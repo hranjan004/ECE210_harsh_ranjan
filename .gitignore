@@ -5,9 +5,14 @@
 *.fst.hier
 runs
 tt_submission
+tt
+.pytest_cache
+__pycache__/
+golden/__pycache__/
+test/__pycache__/
+test/models/__pycache__/
 src/user_config.json
 src/config_merged.json
 test/sim_build
-test/__pycache__/
 test/results.xml
 test/gate_level_netlist.v

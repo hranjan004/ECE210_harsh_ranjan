@@ -1,42 +1,28 @@
 ![](../../workflows/gds/badge.svg) ![](../../workflows/docs/badge.svg) ![](../../workflows/test/badge.svg) ![](../../workflows/fpga/badge.svg)
 
-# Tiny Tapeout Verilog Project Template
+# NILM-TT: A Streaming INT8 LSTM Load-Disaggregation Engine for Tiny Tapeout
 
-- [Read the documentation for project](docs/info.md)
+**Top Module:** `tt_um_harsh_nilm`
 
-## What is Tiny Tapeout?
+NILM-TT is a descriptor-driven INT8 recurrent neural network (LSTM / GRU) inference coprocessor designed for non-intrusive load monitoring (NILM) on residential electrical panels:
+- **Streaming INT8 Datapath:** Single time-multiplexed signed 8x8 MAC (`nilm_mac`) with 24-bit saturating accumulator, round-half-up power-of-two requantization, and multiplierless PLAN piecewise-linear (PWL) `sigmoid` and `tanh` activations (`nilm_pwl`, `nilm_cell`).
+- **Unified 1-4-4 QSPI Memory Controller (`nilm_qspi`):** Streams panel descriptors, weights, biases, and thresholds from the Tiny Tapeout QSPI Pmod Flash (`CS0_FLASH_N`, `EBh` quad read) and saves/restores 100-byte per-panel recurrent contexts ($h, c$, debounce history) in QSPI PSRAM A (`CS1_RAM_A_N`, `EBh`/`38h` with automatic `PSRAM_BURST_MAX` chunking for $t_{\text{CEM}} \le 8\ \mu\text{s}$ and `BUS_REQ`/`BUS_GNT` handover).
+- **Oversampled Host SPI Slave (`nilm_host_spi`, `nilm_cmd`, `nilm_csr`):** Single-clock-domain Mode-0 SPI slave supporting `LOAD_X`, `RUN`, `RUN_ALL`, `RD_RESULT`, `RD_LOGIT`, `QSPI_INIT`, `STEP_UNIT`, optional CRC-8 frame validation, and full CSR buffer windows (`U_WIN`, `HB_WIN`, `C_WIN`).
+- **Bit-Exact Verification:** Validated against the integer NumPy golden model (`golden/nilm_golden.py`) across unit, protocol, cell, multi-panel LSTM/GRU, debounce, and gate-level smoke cocotb test suites (`test/test.py`).
 
-Tiny Tapeout is an educational project that aims to make it easier and cheaper than ever to get your digital and analog designs manufactured on a real chip.
+## Repository Structure
 
-To learn more and get started, visit https://tinytapeout.com.
+- `src/`: Synthesizable Verilog-2005 RTL (`project.v`, `nilm_pkg.vh`, `nilm_host_spi.v`, `nilm_cmd.v`, `nilm_csr.v`, `nilm_qspi.v`, `nilm_seq.v`, `nilm_mac.v`, `nilm_pwl.v`, `nilm_cell.v`, `nilm_head.v`, `nilm_vram.v`)
+- `golden/`: Bit-exact Python integer golden model (`fixedpoint.py`, `pwl.py`, `blob.py`, `nilm_golden.py`) and unit tests (`test_golden.py`)
+- `test/`: Cocotb testbench (`tb.v`, `test.py`) and pin-accurate behavioural models (`models/qspi_flash.py`, `models/psram_aps6404.py`, `models/host_spi_driver.py`)
+- `docs/info.md`: Tiny Tapeout project datasheet
 
-## Set up your Verilog project
+## Running Simulations Locally
 
-1. Add your Verilog files to the `src` folder.
-2. Edit the [info.yaml](info.yaml) and update information about your project, paying special attention to the `source_files` and `top_module` properties. If you are upgrading an existing Tiny Tapeout project, check out our [online info.yaml migration tool](https://tinytapeout.github.io/tt-yaml-upgrade-tool/).
-3. Edit [docs/info.md](docs/info.md) and add a description of your project.
-4. Adapt the testbench to your design. See [test/README.md](test/README.md) for more information.
-
-The GitHub action will automatically build the ASIC files using [LibreLane](https://www.zerotoasiccourse.com/terminology/librelane/).
-
-## Enable GitHub actions to build the results page
-
-- [Enabling GitHub Pages](https://tinytapeout.com/faq/#my-github-action-is-failing-on-the-pages-part)
-
-## Resources
-
-- [FAQ](https://tinytapeout.com/faq/)
-- [Digital design lessons](https://tinytapeout.com/digital_design/)
-- [Learn how semiconductors work](https://tinytapeout.com/siliwiz/)
-- [Join the community](https://tinytapeout.com/discord)
-- [Build your design locally](https://www.tinytapeout.com/guides/local-hardening/)
-
-## What next?
-
-- [Submit your design to the next shuttle](https://app.tinytapeout.com/).
-- Edit [this README](README.md) and explain your design, how it works, and how to test it.
-- Share your project on your social network of choice:
-  - LinkedIn [#tinytapeout](https://www.linkedin.com/search/results/content/?keywords=%23tinytapeout) [@TinyTapeout](https://www.linkedin.com/company/100708654/)
-  - Mastodon [#tinytapeout](https://chaos.social/tags/tinytapeout) [@matthewvenn](https://chaos.social/@matthewvenn)
-  - X (formerly Twitter) [#tinytapeout](https://twitter.com/hashtag/tinytapeout) [@tinytapeout](https://twitter.com/tinytapeout)
-  - Bluesky [@tinytapeout.com](https://bsky.app/profile/tinytapeout.com)
+```bash
+# Run Verilator + Icarus Verilog lint, Python golden unit tests, and cocotb RTL tests
+make lint
+make golden
+make test
+make synth
+```

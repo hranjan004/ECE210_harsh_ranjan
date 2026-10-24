@@ -1,56 +1,65 @@
 # Tiny Tapeout project information
 project:
-  title:        ""      # Project title
-  author:       ""      # Your name
-  discord:      ""      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
-  description:  ""      # One line description of what your project does
-  language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
-  clock_hz:     0       # Clock frequency in Hz (or 0 if not applicable)
+  title:        "NILM-TT: Streaming INT8 LSTM Load-Disaggregation Engine"
+  author:       "Harsh Ranjan"
+  discord:      "hranjan004"
+  description:  "Descriptor-driven INT8 LSTM/GRU inference coprocessor with QSPI Flash weight streaming and PSRAM context storage for non-intrusive load monitoring"
+  language:     "Verilog"
+  clock_hz:     25000000
 
   # How many tiles your design occupies? A single tile is about 167x108 uM.
-  tiles: "1x1"          # Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2 or 8x2
+  tiles: "8x2"          # Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2 or 8x2
 
   # Your top module name must start with "tt_um_". Make it unique by including your github username:
-  top_module:  "tt_um_example"
+  top_module:  "tt_um_harsh_nilm"
 
   # List your project's source files here.
   # Source files must be in ./src and you must list each source file separately, one per line.
   # Don't forget to also update `PROJECT_SOURCES` in test/Makefile.
   source_files:
     - "project.v"
+    - "nilm_host_spi.v"
+    - "nilm_cmd.v"
+    - "nilm_csr.v"
+    - "nilm_qspi.v"
+    - "nilm_seq.v"
+    - "nilm_mac.v"
+    - "nilm_pwl.v"
+    - "nilm_cell.v"
+    - "nilm_head.v"
+    - "nilm_vram.v"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
-# This section is for the datasheet/website. Use descriptive names (e.g., RX, TX, MOSI, SCL, SEG_A, etc.).
 pinout:
   # Inputs
-  ui[0]: ""
-  ui[1]: ""
-  ui[2]: ""
-  ui[3]: ""
-  ui[4]: ""
-  ui[5]: ""
-  ui[6]: ""
-  ui[7]: ""
+  ui[0]: "HOST_CS_N"
+  ui[1]: "HOST_SCK"
+  ui[2]: "HOST_MOSI"
+  ui[3]: "BUS_REQ"
+  ui[4]: "RUN_PIN"
+  ui[5]: "DBG_SEL0"
+  ui[6]: "DBG_SEL1"
+  ui[7]: "DBG_SEL2"
 
   # Outputs
-  uo[0]: ""
-  uo[1]: ""
-  uo[2]: ""
-  uo[3]: ""
-  uo[4]: ""
-  uo[5]: ""
-  uo[6]: ""
-  uo[7]: ""
+  uo[0]: "HOST_MISO"
+  uo[1]: "IRQ"
+  uo[2]: "BUSY"
+  uo[3]: "BUS_GNT"
+  uo[4]: "ERR"
+  uo[5]: "DBG0"
+  uo[6]: "DBG1"
+  uo[7]: "DBG2"
 
-  # Bidirectional pins
-  uio[0]: ""
-  uio[1]: ""
-  uio[2]: ""
-  uio[3]: ""
-  uio[4]: ""
-  uio[5]: ""
-  uio[6]: ""
-  uio[7]: ""
+  # Bidirectional pins (Tiny Tapeout QSPI Pmod standard pinout)
+  uio[0]: "CS0_FLASH_N"
+  uio[1]: "SD0"
+  uio[2]: "SD1"
+  uio[3]: "SCK"
+  uio[4]: "SD2"
+  uio[5]: "SD3"
+  uio[6]: "CS1_RAM_A_N"
+  uio[7]: "CS2_RAM_B_N"
 
 # Do not change!
 yaml_version: 6
