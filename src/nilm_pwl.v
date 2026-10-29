@@ -1,5 +1,5 @@
 /*
- * PLAN-style Piecewise-Linear (PWL) Sigmoid and Tanh (§8.4)
+ * PLAN-style Piecewise-Linear (PWL) Sigmoid and Tanh (Sec. 8.4)
  * Shared combinational datapath:
  *   sigma_pwl(pre_q34) -> UINT8 Q0.8 [0..255]
  *   tanh_pwl(pre_q34)  -> INT8  Q0.7 [-127..127] via 2*sigma(2x) - 1
@@ -13,10 +13,9 @@ module nilm_pwl (
 );
 
   wire is_neg = pre_in[7];
-  wire [8:0] abs_x = is_neg ? (9'd0 - {pre_in[7], pre_in}) : {1'b0, pre_in};
+  wire [8:0] abs_x  = is_neg ? (9'd0 - {pre_in[7], pre_in}) : {1'b0, pre_in};
   wire [9:0] abs_2x = {abs_x, 1'b0};
 
-  // Helper function for _pwl_pos_q08(ax) in [128..256]
   function [8:0] pwl_pos_q08;
     input [9:0] ax;
     begin
@@ -42,5 +41,7 @@ module nilm_pwl (
 
   assign tanh_out = (pre_in == 8'sd0) ? 8'sd0 :
                     (is_neg ? $signed(tanh_neg_val) : $signed(tanh_mag));
+
+  wire _unused = &{sig_neg[8], 1'b0};
 
 endmodule

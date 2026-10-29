@@ -1,9 +1,5 @@
 /*
- * Oversampled Host SPI-Slave Interface (§7.1, §7.2, §8.1)
- * - Mode 0 (CPOL=0, CPHA=0), MSB first
- * - 2-FF synchronizers on HOST_CS_N, HOST_SCK, HOST_MOSI (single clock domain N6)
- * - Samples MOSI on synchronized SCK rising edge; shifts MISO on synchronized SCK falling edge
- * - Detects mid-byte CS_N rising edge abort (ERR_FRAME 0x01)
+ * Oversampled Host SPI-Slave Interface (Sec. 7.1, 7.2, 8.1)
  */
 `default_nettype none
 
@@ -15,15 +11,14 @@ module nilm_host_spi (
     input  wire       spi_mosi,
     output wire       spi_miso,
 
-    output wire       frame_start,   // 1-clk pulse when CS_N falls
-    output wire       frame_end,     // 1-clk pulse when CS_N rises
-    output reg        frame_err,     // 1-clk pulse if CS_N rises with bit_cnt != 0
-    output reg        rx_valid,      // 1-clk pulse when a full byte is received
+    output wire       frame_start,
+    output wire       frame_end,
+    output reg        frame_err,
+    output reg        rx_valid,
     output reg  [7:0] rx_byte,
-    input  wire [7:0] tx_byte        // Byte to transmit on next byte boundary
+    input  wire [7:0] tx_byte
 );
 
-  // 2-FF synchronizers (plus 1 stage for edge detection)
   reg [2:0] csn_sync;
   reg [2:0] sck_sync;
   reg [1:0] mosi_sync;
@@ -51,7 +46,7 @@ module nilm_host_spi (
   assign frame_end   = csn_rise;
 
   reg [2:0] bit_cnt;
-  reg [7:0] rx_shift;
+  reg [6:0] rx_shift;
   reg [7:0] tx_shift;
   reg       byte_done_pending;
 
@@ -60,7 +55,7 @@ module nilm_host_spi (
   always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       bit_cnt           <= 3'd0;
-      rx_shift          <= 8'h00;
+      rx_shift          <= 7'h00;
       tx_shift          <= 8'h00;
       rx_valid          <= 1'b0;
       rx_byte           <= 8'h00;
@@ -82,10 +77,10 @@ module nilm_host_spi (
         byte_done_pending <= 1'b0;
       end else if (!csn_val) begin
         if (sck_rise) begin
-          rx_shift <= {rx_shift[6:0], mosi_val};
+          rx_shift <= {rx_shift[5:0], mosi_val};
           if (bit_cnt == 3'd7) begin
             bit_cnt           <= 3'd0;
-            rx_byte           <= {rx_shift[6:0], mosi_val};
+            rx_byte           <= {rx_shift, mosi_val};
             rx_valid          <= 1'b1;
             byte_done_pending <= 1'b1;
           end else begin

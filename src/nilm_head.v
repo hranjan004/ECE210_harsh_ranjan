@@ -1,8 +1,5 @@
 /*
- * Linear Logit Head Comparator & N-of-M Debounce Unit (§8.7)
- * - Compares signed INT16 logit_m >= theta_m
- * - Shifts raw_on into 4-bit history deb_hist_in
- * - Evaluates popcount(hist_new & mask(deb_m)) >= deb_n when deb_en && deb_n > 0
+ * Linear Logit Head Comparator & N-of-M Debounce Unit (Sec. 8.7)
  */
 `default_nettype none
 
@@ -33,5 +30,7 @@ module nilm_head (
                         {2'b00, masked[3]};
 
   assign head_on = (deb_en && (deb_n != 4'd0)) ? ({1'b0, popcnt} >= deb_n) : raw_on;
+
+  wire _unused = &{deb_hist_in[3], 1'b0};
 
 endmodule

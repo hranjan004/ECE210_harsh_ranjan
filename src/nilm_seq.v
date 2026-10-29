@@ -1,8 +1,94 @@
 /*
  * NILM-TT 27-State Microsequencer & Descriptor Engine (Sec. 6.2, 8.6)
+ * Multiplier-free implementation using open-ended Flash weight streaming
+ * and a 24-bit running Flash address register (lstm_cur_addr) for STEP_UNIT.
  */
 `default_nettype none
-`include "nilm_pkg.vh"
+
+`ifndef NILM_PKG_VH
+`define NILM_PKG_VH
+`define NILM_ID_BYTE0       8'h4E
+`define NILM_ID_BYTE1       8'h54
+`define NILM_VERSION        8'h10
+`define OP_WR_REG           8'h01
+`define OP_RD_REG           8'h02
+`define OP_RD_REG_BURST     8'h03
+`define OP_LOAD_X           8'h10
+`define OP_LOAD_CTX         8'h11
+`define OP_READ_CTX         8'h12
+`define OP_RUN              8'h20
+`define OP_RUN_ALL          8'h21
+`define OP_RD_RESULT        8'h30
+`define OP_RD_LOGIT         8'h31
+`define OP_CTX_RESET        8'h40
+`define OP_QSPI_INIT        8'h50
+`define OP_BUS_RELEASE      8'h60
+`define OP_BUS_ACQUIRE      8'h61
+`define OP_MEM_RD           8'h70
+`define OP_MEM_WR           8'h71
+`define OP_STEP_UNIT        8'h80
+`define OP_ID               8'hA5
+`define CSR_ID              8'h00
+`define CSR_VERSION         8'h01
+`define CSR_STATUS          8'h02
+`define CSR_CTRL            8'h03
+`define CSR_PANEL_SEL       8'h04
+`define CSR_QSPI_CFG        8'h05
+`define CSR_FLASH_BASE_L    8'h06
+`define CSR_FLASH_BASE_M    8'h07
+`define CSR_FLASH_BASE_H    8'h08
+`define CSR_CTX_BASE_L      8'h09
+`define CSR_CTX_BASE_M      8'h0A
+`define CSR_CTX_BASE_H      8'h0B
+`define CSR_PSRAM_BURST_MAX 8'h0C
+`define CSR_INIT_WAIT       8'h0D
+`define CSR_ERR_CODE        8'h0E
+`define CSR_RESULT_LO       8'h10
+`define CSR_RESULT_HI       8'h11
+`define CSR_NHEAD           8'h12
+`define CSR_CYCLES_L        8'h14
+`define CSR_CYCLES_M        8'h15
+`define CSR_CYCLES_H        8'h16
+`define CSR_DBG_STATE       8'h18
+`define CSR_DBG_UNIT        8'h19
+`define CSR_DBG_ACC_L       8'h1A
+`define CSR_DBG_ACC_M       8'h1B
+`define CSR_DBG_ACC_H       8'h1C
+`define ERR_NONE            8'h00
+`define ERR_FRAME           8'h01
+`define ERR_OPCODE          8'h02
+`define ERR_MAGIC           8'h10
+`define ERR_DESC            8'h11
+`define ERR_BUS_BUSY        8'h20
+`define ERR_ABORT           8'h30
+`define ST_IDLE             5'd0
+`define ST_INIT_RST         5'd1
+`define ST_INIT_WAIT        5'd2
+`define ST_CHK_MAGIC        5'd3
+`define ST_DESC_FETCH       5'd4
+`define ST_CTX_LOAD         5'd5
+`define ST_GATE_BIAS        5'd6
+`define ST_GATE_MAC         5'd7
+`define ST_GATE_ACT         5'd8
+`define ST_CELL_FC          5'd9
+`define ST_CELL_IG          5'd10
+`define ST_CELL_SUM         5'd11
+`define ST_CELL_TANH        5'd12
+`define ST_CELL_H           5'd13
+`define ST_UNIT_NEXT        5'd14
+`define ST_H_COMMIT         5'd15
+`define ST_DENSE_BIAS       5'd16
+`define ST_DENSE_MAC        5'd17
+`define ST_DENSE_ACT        5'd18
+`define ST_HEAD_BIAS        5'd19
+`define ST_HEAD_MAC         5'd20
+`define ST_HEAD_CMP         5'd21
+`define ST_DEBOUNCE         5'd22
+`define ST_CTX_SAVE         5'd23
+`define ST_DONE             5'd24
+`define ST_ERR              5'd25
+`define ST_BUS_HOST         5'd26
+`endif
 
 module nilm_seq (
     input  wire               clk,
@@ -25,7 +111,6 @@ module nilm_seq (
     input  wire        [23:0] cmd_mem_addr,
     input  wire        [7:0]  cmd_mem_len,
 
-    input  wire               deb_en,
     input  wire               ctx_mode,          // 0: PSRAM context, 1: Host context
     input  wire               host_ctx_loaded,
     input  wire               step_mode,         // 1: Pause after one LSTM unit on STEP_UNIT
@@ -81,14 +166,14 @@ module nilm_seq (
     output reg  signed [7:0]  mac_u_in,
     output reg         [3:0]  mac_req_shift,
     input  wire signed [7:0]  mac_req8_out,
-    input  wire               mac_req8_sat,
     input  wire signed [15:0] mac_req16_out,
-    input  wire               mac_req16_sat,
 
     output wire signed [7:0]  pwl_pre_in,
     input  wire        [7:0]  pwl_sigma_out,
     input  wire signed [7:0]  pwl_tanh_out,
 
+    output wire               cell_en_out,
+    output wire        [1:0]  cell_step_out,
     output wire               cell_type_out,
     output reg         [7:0]  gate_a_i,
     output reg         [7:0]  gate_a_f,
@@ -120,7 +205,6 @@ module nilm_seq (
 
     output reg                vram_h_commit,
     output wire        [5:0]  vram_f_dim,
-    output wire        [5:0]  vram_h_dim,
 
     output reg                vram_c_we,
     output reg         [4:0]  vram_c_waddr,
@@ -132,7 +216,6 @@ module nilm_seq (
     output reg         [3:0]  vram_deb_waddr,
     output reg         [3:0]  vram_deb_wdata,
     output reg         [3:0]  vram_deb_raddr,
-    input  wire        [3:0]  vram_deb_rdata,
     output reg         [1:0]  vram_deb_pair_idx,
     input  wire        [7:0]  vram_deb_pair_rdata,
 
@@ -145,6 +228,11 @@ module nilm_seq (
   assign dbg_state = state;
   assign seq_idle  = (state == `ST_IDLE) || (state == `ST_BUS_HOST);
   assign seq_busy  = !seq_idle;
+
+  assign cell_en_out   = (state == `ST_CELL_FC) || (state == `ST_CELL_IG) || (state == `ST_CELL_TANH);
+  assign cell_step_out = (state == `ST_CELL_FC)   ? 2'd0 :
+                         (state == `ST_CELL_IG)   ? 2'd1 :
+                         (state == `ST_CELL_TANH) ? 2'd2 : 2'd3;
 
   reg run_pin_d;
   wire run_pin_rise = run_pin_Sync && (!run_pin_d);
@@ -159,7 +247,6 @@ module nilm_seq (
   reg        run_all_active;
   reg        single_unit_run;
   reg        mem_op_active;
-  reg        mem_op_write;
 
   reg [5:0]  desc_f;
   reg [5:0]  desc_h;
@@ -176,9 +263,9 @@ module nilm_seq (
   reg [23:0] desc_w_lstm_off;
   reg [23:0] desc_w_z_off;
   reg [23:0] desc_w_head_off;
+  reg [23:0] lstm_cur_addr;
 
   assign vram_f_dim    = desc_f;
-  assign vram_h_dim    = desc_h;
   assign cell_type_out = desc_cell_type;
   assign head_deb_n    = desc_deb_n;
   assign head_deb_m    = desc_deb_m;
@@ -188,7 +275,7 @@ module nilm_seq (
   reg [6:0]  elem_n;
   reg [4:0]  dense_l;
   reg [4:0]  head_m;
-  reg [15:0] sub_cnt;
+  reg [11:0] sub_cnt;
   reg [7:0]  byte_lo;
   reg [7:0]  theta_lo;
   reg        qspi_started;
@@ -209,12 +296,8 @@ module nilm_seq (
     endcase
   end
 
-  wire [1:0]  num_gates_m1 = desc_cell_type ? 2'd2 : 2'd3;
-  wire [6:0]  vec_len      = {1'b0, desc_f} + {1'b0, desc_h};
-  wire [15:0] gates_per_u  = desc_cell_type ? 16'd3 : 16'd4;
-  wire [15:0] gate_stride  = 16'd2 + {9'd0, vec_len};
-  wire [15:0] unit_stride  = gates_per_u * gate_stride;
-  wire [23:0] unit_off_24  = {19'd0, unit_j} * {8'd0, unit_stride};
+  wire [1:0] num_gates_m1 = desc_cell_type ? 2'd2 : 2'd3;
+  wire [6:0] vec_len      = {1'b0, desc_f} + {1'b0, desc_h};
 
   reg [23:0] cur_desc_off;
   always @(*) begin
@@ -236,11 +319,11 @@ module nilm_seq (
                          (state == `ST_HEAD_BIAS)  ||
                          (state == `ST_HEAD_MAC);
 
-  wire [15:0] c_byte_off   = (sub_cnt - 16'd32) >> 1;
-  wire [15:0] deb_byte_off = sub_cnt - 16'd96;
-  wire [15:0] deb_hi_off   = sub_cnt - 16'd97;
+  wire [5:0] c_sub_off    = sub_cnt[5:0] - 6'd32;
+  wire [4:0] c_byte_off   = c_sub_off[5:1];
+  wire [2:0] deb_byte_off = sub_cnt[2:0]; // 96 & 7 == 0
+  wire [2:0] deb_hi_off   = sub_cnt[2:0] - 3'd1;
 
-  // Combinational VRAM read address steering
   always @(*) begin
     vram_u_raddr      = 6'd0;
     vram_hb_raddr     = 5'd0;
@@ -262,23 +345,22 @@ module nilm_seq (
     end else if (state == `ST_CTX_SAVE) begin
       if (mem_op_active) begin
         vram_u_raddr = sub_cnt[5:0];
-      end else if (sub_cnt < 16'd32) begin
+      end else if (sub_cnt < 12'd32) begin
         vram_u_raddr = 6'd32 + sub_cnt[5:0];
-      end else if (sub_cnt < 16'd96) begin
-        vram_c_raddr = c_byte_off[4:0];
+      end else if (sub_cnt < 12'd96) begin
+        vram_c_raddr = c_byte_off;
       end else begin
         vram_deb_pair_idx = deb_byte_off[1:0];
       end
     end
   end
 
-  // Combinational write byte for PSRAM CTX_SAVE or MEM_WR
   always @(*) begin
     if (mem_op_active) begin
       qspi_wr_data = vram_u_rdata;
-    end else if (sub_cnt < 16'd32) begin
+    end else if (sub_cnt < 12'd32) begin
       qspi_wr_data = (sub_cnt[5:0] < desc_h) ? vram_u_rdata : 8'h00;
-    end else if (sub_cnt < 16'd96) begin
+    end else if (sub_cnt < 12'd96) begin
       qspi_wr_data = sub_cnt[0] ? vram_c_rdata[15:8] : vram_c_rdata[7:0];
     end else begin
       qspi_wr_data = vram_deb_pair_rdata;
@@ -303,7 +385,6 @@ module nilm_seq (
       run_all_active   <= 1'b0;
       single_unit_run  <= 1'b0;
       mem_op_active    <= 1'b0;
-      mem_op_write     <= 1'b0;
       desc_f           <= 6'd14;
       desc_h           <= 6'd32;
       desc_nz          <= 5'd16;
@@ -319,12 +400,13 @@ module nilm_seq (
       desc_w_lstm_off  <= 24'd0;
       desc_w_z_off     <= 24'd0;
       desc_w_head_off  <= 24'd0;
+      lstm_cur_addr    <= 24'd0;
       unit_j           <= 5'd0;
       gate_k           <= 2'd0;
       elem_n           <= 7'd0;
       dense_l          <= 5'd0;
       head_m           <= 5'd0;
-      sub_cnt          <= 16'd0;
+      sub_cnt          <= 12'd0;
       byte_lo          <= 8'h00;
       theta_lo         <= 8'h00;
       qspi_started     <= 1'b0;
@@ -450,19 +532,18 @@ module nilm_seq (
                 end else begin
                   gate_k         <= 2'd0;
                   elem_n         <= 7'd0;
-                  sub_cnt        <= 16'd0;
+                  sub_cnt        <= 12'd0;
                   qspi_cmd_valid <= 1'b1;
                   qspi_cmd_type  <= 2'd2;
                   qspi_cmd_dev   <= 1'b0;
-                  qspi_cmd_addr  <= flash_base + desc_w_lstm_off + unit_off_24;
-                  qspi_cmd_len   <= unit_stride;
+                  qspi_cmd_addr  <= lstm_cur_addr;
+                  qspi_cmd_len   <= 16'hFFFF;
                   state          <= `ST_GATE_BIAS;
                 end
               end else if (cmd_mem_rd_trig) begin
                 cycle_cnt      <= 24'd0;
                 mem_op_active  <= 1'b1;
-                mem_op_write   <= 1'b0;
-                sub_cnt        <= 16'd0;
+                sub_cnt        <= 12'd0;
                 qspi_cmd_valid <= 1'b1;
                 qspi_cmd_type  <= 2'd2;
                 qspi_cmd_dev   <= cmd_mem_dev;
@@ -472,8 +553,7 @@ module nilm_seq (
               end else if (cmd_mem_wr_trig) begin
                 cycle_cnt      <= 24'd0;
                 mem_op_active  <= 1'b1;
-                mem_op_write   <= 1'b1;
-                sub_cnt        <= 16'd0;
+                sub_cnt        <= 12'd0;
                 qspi_cmd_valid <= 1'b1;
                 qspi_cmd_type  <= 2'd3;
                 qspi_cmd_dev   <= 1'b1;
@@ -486,14 +566,14 @@ module nilm_seq (
 
           `ST_INIT_RST: begin
             if (qspi_cmd_done) begin
-              sub_cnt <= 16'd0;
+              sub_cnt <= 12'd0;
               state   <= `ST_INIT_WAIT;
             end
           end
 
           `ST_INIT_WAIT: begin
-            if (sub_cnt >= ({8'd0, init_wait} << 4)) begin
-              sub_cnt        <= 16'd0;
+            if (sub_cnt >= ({4'd0, init_wait} << 4)) begin
+              sub_cnt        <= 12'd0;
               qspi_cmd_valid <= 1'b1;
               qspi_cmd_type  <= 2'd2;
               qspi_cmd_dev   <= 1'b0;
@@ -501,51 +581,51 @@ module nilm_seq (
               qspi_cmd_len   <= 16'd20;
               state          <= `ST_CHK_MAGIC;
             end else begin
-              sub_cnt <= sub_cnt + 16'd1;
+              sub_cnt <= sub_cnt + 12'd1;
             end
           end
 
           `ST_CHK_MAGIC: begin
             if (qspi_rd_valid) begin
-              sub_cnt <= sub_cnt + 16'd1;
+              sub_cnt <= sub_cnt + 12'd1;
               case (sub_cnt)
-                16'd0: if (qspi_rd_data != 8'h4E) begin
+                12'd0: if (qspi_rd_data != 8'h4E) begin
                   qspi_cmd_abort <= 1'b1;
                   seq_err_pulse  <= 1'b1;
                   seq_err_code   <= `ERR_MAGIC;
                   state          <= `ST_ERR;
                 end
-                16'd1: if (qspi_rd_data != 8'h49) begin
+                12'd1: if (qspi_rd_data != 8'h49) begin
                   qspi_cmd_abort <= 1'b1;
                   seq_err_pulse  <= 1'b1;
                   seq_err_code   <= `ERR_MAGIC;
                   state          <= `ST_ERR;
                 end
-                16'd2: if (qspi_rd_data != 8'h4C) begin
+                12'd2: if (qspi_rd_data != 8'h4C) begin
                   qspi_cmd_abort <= 1'b1;
                   seq_err_pulse  <= 1'b1;
                   seq_err_code   <= `ERR_MAGIC;
                   state          <= `ST_ERR;
                 end
-                16'd3: if (qspi_rd_data != 8'h4D) begin
+                12'd3: if (qspi_rd_data != 8'h4D) begin
                   qspi_cmd_abort <= 1'b1;
                   seq_err_pulse  <= 1'b1;
                   seq_err_code   <= `ERR_MAGIC;
                   state          <= `ST_ERR;
                 end
-                16'd5:  blob_npanel       <= qspi_rd_data[2:0];
-                16'd8:  desc_off_0[7:0]   <= qspi_rd_data;
-                16'd9:  desc_off_0[15:8]  <= qspi_rd_data;
-                16'd10: desc_off_0[23:16] <= qspi_rd_data;
-                16'd11: desc_off_1[7:0]   <= qspi_rd_data;
-                16'd12: desc_off_1[15:8]  <= qspi_rd_data;
-                16'd13: desc_off_1[23:16] <= qspi_rd_data;
-                16'd14: desc_off_2[7:0]   <= qspi_rd_data;
-                16'd15: desc_off_2[15:8]  <= qspi_rd_data;
-                16'd16: desc_off_2[23:16] <= qspi_rd_data;
-                16'd17: desc_off_3[7:0]   <= qspi_rd_data;
-                16'd18: desc_off_3[15:8]  <= qspi_rd_data;
-                16'd19: desc_off_3[23:16] <= qspi_rd_data;
+                12'd5:  blob_npanel       <= qspi_rd_data[2:0];
+                12'd8:  desc_off_0[7:0]   <= qspi_rd_data;
+                12'd9:  desc_off_0[15:8]  <= qspi_rd_data;
+                12'd10: desc_off_0[23:16] <= qspi_rd_data;
+                12'd11: desc_off_1[7:0]   <= qspi_rd_data;
+                12'd12: desc_off_1[15:8]  <= qspi_rd_data;
+                12'd13: desc_off_1[23:16] <= qspi_rd_data;
+                12'd14: desc_off_2[7:0]   <= qspi_rd_data;
+                12'd15: desc_off_2[15:8]  <= qspi_rd_data;
+                12'd16: desc_off_2[23:16] <= qspi_rd_data;
+                12'd17: desc_off_3[7:0]   <= qspi_rd_data;
+                12'd18: desc_off_3[15:8]  <= qspi_rd_data;
+                12'd19: desc_off_3[23:16] <= qspi_rd_data;
                 default: ;
               endcase
             end
@@ -558,7 +638,7 @@ module nilm_seq (
           `ST_DESC_FETCH: begin
             if (!qspi_started) begin
               qspi_started   <= 1'b1;
-              sub_cnt        <= 16'd0;
+              sub_cnt        <= 12'd0;
               qspi_cmd_valid <= 1'b1;
               qspi_cmd_type  <= 2'd2;
               qspi_cmd_dev   <= 1'b0;
@@ -566,33 +646,33 @@ module nilm_seq (
               qspi_cmd_len   <= 16'd32;
             end else begin
               if (qspi_rd_valid) begin
-                sub_cnt <= sub_cnt + 16'd1;
+                sub_cnt <= sub_cnt + 12'd1;
                 case (sub_cnt)
-                  16'd0: if (qspi_rd_data != 8'h4E) begin
+                  12'd0: if (qspi_rd_data != 8'h4E) begin
                     qspi_cmd_abort <= 1'b1;
                     seq_err_pulse  <= 1'b1;
                     seq_err_code   <= `ERR_DESC;
                     state          <= `ST_ERR;
                   end
-                  16'd1: if (qspi_rd_data != 8'h54) begin
+                  12'd1: if (qspi_rd_data != 8'h54) begin
                     qspi_cmd_abort <= 1'b1;
                     seq_err_pulse  <= 1'b1;
                     seq_err_code   <= `ERR_DESC;
                     state          <= `ST_ERR;
                   end
-                  16'd2: if (qspi_rd_data != 8'h50) begin
+                  12'd2: if (qspi_rd_data != 8'h50) begin
                     qspi_cmd_abort <= 1'b1;
                     seq_err_pulse  <= 1'b1;
                     seq_err_code   <= `ERR_DESC;
                     state          <= `ST_ERR;
                   end
-                  16'd3: if (qspi_rd_data != 8'h44) begin
+                  12'd3: if (qspi_rd_data != 8'h44) begin
                     qspi_cmd_abort <= 1'b1;
                     seq_err_pulse  <= 1'b1;
                     seq_err_code   <= `ERR_DESC;
                     state          <= `ST_ERR;
                   end
-                  16'd4: begin
+                  12'd4: begin
                     if (qspi_rd_data == 8'd0 || qspi_rd_data > 8'd32) begin
                       qspi_cmd_abort <= 1'b1;
                       seq_err_pulse  <= 1'b1;
@@ -601,7 +681,7 @@ module nilm_seq (
                     end
                     desc_f <= qspi_rd_data[5:0];
                   end
-                  16'd5: begin
+                  12'd5: begin
                     if (qspi_rd_data == 8'd0 || qspi_rd_data > 8'd32) begin
                       qspi_cmd_abort <= 1'b1;
                       seq_err_pulse  <= 1'b1;
@@ -610,8 +690,8 @@ module nilm_seq (
                     end
                     desc_h <= qspi_rd_data[5:0];
                   end
-                  16'd6:  desc_nz        <= qspi_rd_data[4:0];
-                  16'd7: begin
+                  12'd6:  desc_nz        <= qspi_rd_data[4:0];
+                  12'd7: begin
                     desc_nhead <= qspi_rd_data[4:0];
                     case (cur_panel)
                       2'd0: panel_nhead_0 <= qspi_rd_data[4:0];
@@ -620,29 +700,30 @@ module nilm_seq (
                       default: panel_nhead_3 <= qspi_rd_data[4:0];
                     endcase
                   end
-                  16'd8:  desc_cell_type <= qspi_rd_data[0];
-                  16'd9:  begin desc_s_i <= qspi_rd_data[3:0]; desc_b_i <= qspi_rd_data[7:4]; end
-                  16'd10: begin desc_s_f <= qspi_rd_data[3:0]; desc_b_f <= qspi_rd_data[7:4]; end
-                  16'd11: begin desc_s_g <= qspi_rd_data[3:0]; desc_b_g <= qspi_rd_data[7:4]; end
-                  16'd12: begin desc_s_o <= qspi_rd_data[3:0]; desc_b_o <= qspi_rd_data[7:4]; end
-                  16'd13: begin desc_s_z <= qspi_rd_data[3:0]; desc_b_z <= qspi_rd_data[7:4]; end
-                  16'd14: begin desc_s_head <= qspi_rd_data[3:0]; desc_b_head <= qspi_rd_data[7:4]; end
-                  16'd15: begin desc_deb_n <= qspi_rd_data[3:0]; desc_deb_m <= qspi_rd_data[7:4]; end
-                  16'd16: desc_w_lstm_off[7:0]   <= qspi_rd_data;
-                  16'd17: desc_w_lstm_off[15:8]  <= qspi_rd_data;
-                  16'd18: desc_w_lstm_off[23:16] <= qspi_rd_data;
-                  16'd19: desc_w_z_off[7:0]      <= qspi_rd_data;
-                  16'd20: desc_w_z_off[15:8]     <= qspi_rd_data;
-                  16'd21: desc_w_z_off[23:16]    <= qspi_rd_data;
-                  16'd22: desc_w_head_off[7:0]   <= qspi_rd_data;
-                  16'd23: desc_w_head_off[15:8]  <= qspi_rd_data;
-                  16'd24: desc_w_head_off[23:16] <= qspi_rd_data;
+                  12'd8:  desc_cell_type <= qspi_rd_data[0];
+                  12'd9:  begin desc_s_i <= qspi_rd_data[3:0]; desc_b_i <= qspi_rd_data[7:4]; end
+                  12'd10: begin desc_s_f <= qspi_rd_data[3:0]; desc_b_f <= qspi_rd_data[7:4]; end
+                  12'd11: begin desc_s_g <= qspi_rd_data[3:0]; desc_b_g <= qspi_rd_data[7:4]; end
+                  12'd12: begin desc_s_o <= qspi_rd_data[3:0]; desc_b_o <= qspi_rd_data[7:4]; end
+                  12'd13: begin desc_s_z <= qspi_rd_data[3:0]; desc_b_z <= qspi_rd_data[7:4]; end
+                  12'd14: begin desc_s_head <= qspi_rd_data[3:0]; desc_b_head <= qspi_rd_data[7:4]; end
+                  12'd15: begin desc_deb_n <= qspi_rd_data[3:0]; desc_deb_m <= qspi_rd_data[7:4]; end
+                  12'd16: desc_w_lstm_off[7:0]   <= qspi_rd_data;
+                  12'd17: desc_w_lstm_off[15:8]  <= qspi_rd_data;
+                  12'd18: desc_w_lstm_off[23:16] <= qspi_rd_data;
+                  12'd19: desc_w_z_off[7:0]      <= qspi_rd_data;
+                  12'd20: desc_w_z_off[15:8]     <= qspi_rd_data;
+                  12'd21: desc_w_z_off[23:16]    <= qspi_rd_data;
+                  12'd22: desc_w_head_off[7:0]   <= qspi_rd_data;
+                  12'd23: desc_w_head_off[15:8]  <= qspi_rd_data;
+                  12'd24: desc_w_head_off[23:16] <= qspi_rd_data;
                   default: ;
                 endcase
               end
               if (qspi_cmd_done && state == `ST_DESC_FETCH) begin
-                qspi_started <= 1'b0;
-                sub_cnt      <= 16'd0;
+                qspi_started  <= 1'b0;
+                sub_cnt       <= 12'd0;
+                lstm_cur_addr <= flash_base + desc_w_lstm_off;
                 if (ctx_mode || !psram_en) begin
                   if (host_ctx_loaded) begin
                     vram_h_commit <= 1'b1;
@@ -654,7 +735,7 @@ module nilm_seq (
                   qspi_cmd_type  <= 2'd2;
                   qspi_cmd_dev   <= 1'b0;
                   qspi_cmd_addr  <= flash_base + desc_w_lstm_off;
-                  qspi_cmd_len   <= (single_unit_run ? 16'd1 : {10'd0, desc_h}) * unit_stride;
+                  qspi_cmd_len   <= 16'hFFFF;
                   state          <= `ST_GATE_BIAS;
                 end else begin
                   qspi_cmd_valid <= 1'b1;
@@ -674,7 +755,7 @@ module nilm_seq (
                 vram_u_we    <= 1'b1;
                 vram_u_waddr <= sub_cnt[5:0];
                 vram_u_wdata <= $signed(qspi_rd_data);
-                sub_cnt      <= sub_cnt + 16'd1;
+                sub_cnt      <= sub_cnt + 12'd1;
               end
               if (qspi_cmd_done) begin
                 mem_op_active <= 1'b0;
@@ -684,29 +765,29 @@ module nilm_seq (
               if (deb_hi_sel) begin
                 deb_hi_sel     <= 1'b0;
                 vram_deb_we    <= 1'b1;
-                vram_deb_waddr <= {deb_hi_off[2:0], 1'b1};
+                vram_deb_waddr <= {deb_hi_off, 1'b1};
                 vram_deb_wdata <= byte_lo[7:4];
               end
               if (qspi_rd_valid) begin
-                sub_cnt <= sub_cnt + 16'd1;
-                if (sub_cnt < 16'd32) begin
+                sub_cnt <= sub_cnt + 12'd1;
+                if (sub_cnt < 12'd32) begin
                   if (sub_cnt[5:0] < desc_h) begin
                     vram_u_we    <= 1'b1;
                     vram_u_waddr <= 6'd32 + sub_cnt[5:0];
                     vram_u_wdata <= $signed(qspi_rd_data);
                   end
-                end else if (sub_cnt < 16'd96) begin
+                end else if (sub_cnt < 12'd96) begin
                   if (sub_cnt[0] == 1'b0) begin
                     byte_lo <= qspi_rd_data;
                   end else begin
                     vram_c_we    <= 1'b1;
-                    vram_c_waddr <= c_byte_off[4:0];
+                    vram_c_waddr <= c_byte_off;
                     vram_c_wdata <= $signed({qspi_rd_data, byte_lo});
                   end
-                end else if (sub_cnt < 16'd100) begin
+                end else if (sub_cnt < 12'd100) begin
                   byte_lo        <= qspi_rd_data;
                   vram_deb_we    <= 1'b1;
-                  vram_deb_waddr <= {deb_byte_off[2:0], 1'b0};
+                  vram_deb_waddr <= {deb_byte_off, 1'b0};
                   vram_deb_wdata <= qspi_rd_data[3:0];
                   deb_hi_sel     <= 1'b1;
                 end
@@ -715,12 +796,12 @@ module nilm_seq (
                 unit_j         <= 5'd0;
                 gate_k         <= 2'd0;
                 elem_n         <= 7'd0;
-                sub_cnt        <= 16'd0;
+                sub_cnt        <= 12'd0;
                 qspi_cmd_valid <= 1'b1;
                 qspi_cmd_type  <= 2'd2;
                 qspi_cmd_dev   <= 1'b0;
-                qspi_cmd_addr  <= flash_base + desc_w_lstm_off;
-                qspi_cmd_len   <= (single_unit_run ? 16'd1 : {10'd0, desc_h}) * unit_stride;
+                qspi_cmd_addr  <= lstm_cur_addr;
+                qspi_cmd_len   <= 16'hFFFF;
                 state          <= `ST_GATE_BIAS;
               end
             end
@@ -728,14 +809,15 @@ module nilm_seq (
 
           `ST_GATE_BIAS: begin
             if (qspi_rd_valid) begin
-              if (sub_cnt == 16'd0) begin
+              lstm_cur_addr <= lstm_cur_addr + 24'd1;
+              if (sub_cnt == 12'd0) begin
                 byte_lo <= qspi_rd_data;
-                sub_cnt <= 16'd1;
+                sub_cnt <= 12'd1;
               end else begin
                 mac_load_bias  <= 1'b1;
                 mac_bias_in    <= $signed({qspi_rd_data, byte_lo});
                 mac_bias_shift <= cur_gate_b;
-                sub_cnt        <= 16'd0;
+                sub_cnt        <= 12'd0;
                 elem_n         <= 7'd0;
                 state          <= `ST_GATE_MAC;
               end
@@ -744,8 +826,9 @@ module nilm_seq (
 
           `ST_GATE_MAC: begin
             if (qspi_rd_valid) begin
-              mac_en   <= 1'b1;
-              mac_w_in <= $signed(qspi_rd_data);
+              lstm_cur_addr <= lstm_cur_addr + 24'd1;
+              mac_en        <= 1'b1;
+              mac_w_in      <= $signed(qspi_rd_data);
               if (desc_cell_type && (gate_k == 2'd2) && (elem_n >= {1'b0, desc_f})) begin
                 mac_u_in <= cell_gru_rh;
               end else begin
@@ -754,9 +837,12 @@ module nilm_seq (
 
               if ((elem_n + 7'd1) >= vec_len) begin
                 elem_n        <= 7'd0;
-                sub_cnt       <= 16'd0;
+                sub_cnt       <= 12'd0;
                 mac_req_shift <= cur_gate_s;
                 state         <= `ST_GATE_ACT;
+                if (gate_k == num_gates_m1 && (({1'b0, unit_j} + 6'd1 >= desc_h) || single_unit_run)) begin
+                  qspi_cmd_abort <= 1'b1;
+                end
               end else begin
                 elem_n <= elem_n + 7'd1;
               end
@@ -764,10 +850,10 @@ module nilm_seq (
           end
 
           `ST_GATE_ACT: begin
-            if (sub_cnt == 16'd0) begin
-              sub_cnt <= 16'd1;
+            if (sub_cnt == 12'd0) begin
+              sub_cnt <= 12'd1;
             end else begin
-              sub_cnt <= 16'd0;
+              sub_cnt <= 12'd0;
               case (gate_k)
                 2'd0: gate_a_i <= pwl_sigma_out;
                 2'd1: gate_a_f <= pwl_sigma_out;
@@ -809,7 +895,7 @@ module nilm_seq (
                 state <= `ST_DONE;
               end else begin
                 gate_k  <= 2'd0;
-                sub_cnt <= 16'd0;
+                sub_cnt <= 12'd0;
                 state   <= `ST_GATE_BIAS;
               end
             end
@@ -820,26 +906,26 @@ module nilm_seq (
             if (!qspi_cmd_busy) begin
               dense_l        <= 5'd0;
               elem_n         <= 7'd0;
-              sub_cnt        <= 16'd0;
+              sub_cnt        <= 12'd0;
               qspi_cmd_valid <= 1'b1;
               qspi_cmd_type  <= 2'd2;
               qspi_cmd_dev   <= 1'b0;
               qspi_cmd_addr  <= flash_base + desc_w_z_off;
-              qspi_cmd_len   <= {11'd0, desc_nz} * (16'd2 + {10'd0, desc_h});
+              qspi_cmd_len   <= 16'hFFFF;
               state          <= `ST_DENSE_BIAS;
             end
           end
 
           `ST_DENSE_BIAS: begin
             if (qspi_rd_valid) begin
-              if (sub_cnt == 16'd0) begin
+              if (sub_cnt == 12'd0) begin
                 byte_lo <= qspi_rd_data;
-                sub_cnt <= 16'd1;
+                sub_cnt <= 12'd1;
               end else begin
                 mac_load_bias  <= 1'b1;
                 mac_bias_in    <= $signed({qspi_rd_data, byte_lo});
                 mac_bias_shift <= desc_b_z;
-                sub_cnt        <= 16'd0;
+                sub_cnt        <= 12'd0;
                 elem_n         <= 7'd0;
                 state          <= `ST_DENSE_MAC;
               end
@@ -853,9 +939,12 @@ module nilm_seq (
               mac_u_in <= vram_u_rdata;
               if ((elem_n[5:0] + 6'd1) >= desc_h) begin
                 elem_n        <= 7'd0;
-                sub_cnt       <= 16'd0;
+                sub_cnt       <= 12'd0;
                 mac_req_shift <= desc_s_z;
                 state         <= `ST_DENSE_ACT;
+                if ((dense_l + 5'd1) >= desc_nz) begin
+                  qspi_cmd_abort <= 1'b1;
+                end
               end else begin
                 elem_n <= elem_n + 7'd1;
               end
@@ -863,8 +952,8 @@ module nilm_seq (
           end
 
           `ST_DENSE_ACT: begin
-            if (sub_cnt == 16'd0) begin
-              sub_cnt <= 16'd1;
+            if (sub_cnt == 12'd0) begin
+              sub_cnt <= 12'd1;
             end else begin
               vram_hb_we    <= 1'b1;
               vram_hb_waddr <= dense_l;
@@ -873,18 +962,18 @@ module nilm_seq (
                 if (!qspi_cmd_busy) begin
                   head_m         <= 5'd0;
                   elem_n         <= 7'd0;
-                  sub_cnt        <= 16'd0;
+                  sub_cnt        <= 12'd0;
                   accum_res_bits <= 16'h0000;
                   qspi_cmd_valid <= 1'b1;
                   qspi_cmd_type  <= 2'd2;
                   qspi_cmd_dev   <= 1'b0;
                   qspi_cmd_addr  <= flash_base + desc_w_head_off;
-                  qspi_cmd_len   <= {11'd0, desc_nhead} * (16'd4 + {11'd0, desc_nz});
+                  qspi_cmd_len   <= 16'hFFFF;
                   state          <= `ST_HEAD_BIAS;
                 end
               end else begin
                 dense_l <= dense_l + 5'd1;
-                sub_cnt <= 16'd0;
+                sub_cnt <= 12'd0;
                 state   <= `ST_DENSE_BIAS;
               end
             end
@@ -893,23 +982,23 @@ module nilm_seq (
           `ST_HEAD_BIAS: begin
             if (qspi_rd_valid) begin
               case (sub_cnt)
-                16'd0: begin
+                12'd0: begin
                   byte_lo <= qspi_rd_data;
-                  sub_cnt <= 16'd1;
+                  sub_cnt <= 12'd1;
                 end
-                16'd1: begin
+                12'd1: begin
                   mac_load_bias  <= 1'b1;
                   mac_bias_in    <= $signed({qspi_rd_data, byte_lo});
                   mac_bias_shift <= desc_b_head;
-                  sub_cnt        <= 16'd2;
+                  sub_cnt        <= 12'd2;
                 end
-                16'd2: begin
+                12'd2: begin
                   theta_lo <= qspi_rd_data;
-                  sub_cnt  <= 16'd3;
+                  sub_cnt  <= 12'd3;
                 end
                 default: begin
                   head_theta_in <= $signed({qspi_rd_data, theta_lo});
-                  sub_cnt       <= 16'd0;
+                  sub_cnt       <= 12'd0;
                   elem_n        <= 7'd0;
                   state         <= `ST_HEAD_MAC;
                 end
@@ -924,9 +1013,12 @@ module nilm_seq (
               mac_u_in <= vram_hb_rdata;
               if ((elem_n[4:0] + 5'd1) >= desc_nz) begin
                 elem_n        <= 7'd0;
-                sub_cnt       <= 16'd0;
+                sub_cnt       <= 12'd0;
                 mac_req_shift <= desc_s_head;
                 state         <= `ST_HEAD_CMP;
+                if ((head_m + 5'd1) >= desc_nhead) begin
+                  qspi_cmd_abort <= 1'b1;
+                end
               end else begin
                 elem_n <= elem_n + 7'd1;
               end
@@ -934,10 +1026,10 @@ module nilm_seq (
           end
 
           `ST_HEAD_CMP: begin
-            if (sub_cnt == 16'd0) begin
-              sub_cnt <= 16'd1;
+            if (sub_cnt == 12'd0) begin
+              sub_cnt <= 12'd1;
             end else begin
-              sub_cnt          <= 16'd0;
+              sub_cnt          <= 12'd0;
               head_logit_in    <= mac_req16_out;
               vram_logit_we    <= 1'b1;
               vram_logit_waddr <= head_m[3:0];
@@ -947,7 +1039,7 @@ module nilm_seq (
           end
 
           `ST_DEBOUNCE: begin
-            if (sub_cnt == 16'd0) begin
+            if (sub_cnt == 12'd0) begin
               vram_deb_we    <= 1'b1;
               vram_deb_waddr <= head_m[3:0];
               vram_deb_wdata <= head_deb_hist_out;
@@ -967,7 +1059,7 @@ module nilm_seq (
             if ((head_m + 5'd1) >= desc_nhead) begin
               if (!qspi_cmd_busy) begin
                 unit_j  <= 5'd0;
-                sub_cnt <= 16'd0;
+                sub_cnt <= 12'd0;
                 if (ctx_mode || !psram_en) begin
                   state <= `ST_DONE;
                 end else begin
@@ -979,22 +1071,21 @@ module nilm_seq (
                   state          <= `ST_CTX_SAVE;
                 end
               end else begin
-                sub_cnt <= 16'd1;
+                sub_cnt <= 12'd1;
               end
             end else begin
               head_m  <= head_m + 5'd1;
-              sub_cnt <= 16'd0;
+              sub_cnt <= 12'd0;
               state   <= `ST_HEAD_BIAS;
             end
           end
 
           `ST_CTX_SAVE: begin
             if (qspi_wr_req) begin
-              sub_cnt <= sub_cnt + 16'd1;
+              sub_cnt <= sub_cnt + 12'd1;
             end
             if (qspi_cmd_done) begin
               mem_op_active <= 1'b0;
-              mem_op_write  <= 1'b0;
               state         <= `ST_DONE;
             end
           end
@@ -1025,5 +1116,7 @@ module nilm_seq (
       end
     end
   end
+
+  wire _unused = &{c_sub_off[0], 1'b0};
 
 endmodule
