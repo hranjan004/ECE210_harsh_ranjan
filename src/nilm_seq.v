@@ -756,7 +756,7 @@ module nilm_seq (
                   qspi_cmd_valid <= 1'b1;
                   qspi_cmd_type  <= 2'd2;
                   qspi_cmd_dev   <= 1'b1;
-                  qspi_cmd_addr  <= ctx_base + ({14'd0, cur_panel} << 8);
+                  qspi_cmd_addr  <= ctx_base + {14'd0, cur_panel, 8'd0};
                   qspi_cmd_len   <= 16'd100;
                   state          <= `ST_CTX_LOAD;
                 end
@@ -1081,7 +1081,7 @@ module nilm_seq (
                   qspi_cmd_valid <= 1'b1;
                   qspi_cmd_type  <= 2'd3;
                   qspi_cmd_dev   <= 1'b1;
-                  qspi_cmd_addr  <= ctx_base + ({14'd0, cur_panel} << 8);
+                  qspi_cmd_addr  <= ctx_base + {14'd0, cur_panel, 8'd0};
                   qspi_cmd_len   <= 16'd100;
                   state          <= `ST_CTX_SAVE;
                 end

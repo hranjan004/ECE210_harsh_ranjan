@@ -177,7 +177,7 @@ module nilm_cmd (
   reg [7:0] c_lo_buf;
 
   reg [7:0] crc_reg;
-  function [7:0] next_crc8;
+  function automatic [7:0] next_crc8;
     input [7:0] c;
     input [7:0] d;
     reg [7:0] v;
