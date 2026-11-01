@@ -16,7 +16,7 @@ BLOB_VERSION = 0x10
 class PanelDescriptor:
     panel_id: int = 0
     F: int = 14
-    H: int = 32
+    H: int = 16
     NZ: int = 16
     NHEAD: int = 4
     cell_type: int = 0  # 0 = LSTM (4 gates), 1 = GRU (3 gates)
@@ -44,10 +44,10 @@ class PanelDescriptor:
     # head_bias:  shape (NHEAD,) int16
     # head_theta: shape (NHEAD,) int16
     # head_w:     shape (NHEAD, NZ) int8
-    lstm_bias: np.ndarray = field(default_factory=lambda: np.zeros((32, 4), dtype=np.int16))
-    lstm_w: np.ndarray = field(default_factory=lambda: np.zeros((32, 4, 46), dtype=np.int8))
+    lstm_bias: np.ndarray = field(default_factory=lambda: np.zeros((16, 4), dtype=np.int16))
+    lstm_w: np.ndarray = field(default_factory=lambda: np.zeros((16, 4, 30), dtype=np.int8))
     dense_bias: np.ndarray = field(default_factory=lambda: np.zeros((16,), dtype=np.int16))
-    dense_w: np.ndarray = field(default_factory=lambda: np.zeros((16, 32), dtype=np.int8))
+    dense_w: np.ndarray = field(default_factory=lambda: np.zeros((16, 16), dtype=np.int8))
     head_bias: np.ndarray = field(default_factory=lambda: np.zeros((4,), dtype=np.int16))
     head_theta: np.ndarray = field(default_factory=lambda: np.zeros((4,), dtype=np.int16))
     head_w: np.ndarray = field(default_factory=lambda: np.zeros((4, 16), dtype=np.int8))
@@ -68,6 +68,9 @@ def _unpack_u24(buf: bytes, offset: int) -> int:
 
 def pack_panel_weights(desc: PanelDescriptor) -> tuple[bytes, bytes, bytes]:
     """Serialize LSTM, Dense, and Head weight streams in hardware consumption order (§8.6)."""
+    for name, maximum in (("F", 32), ("H", 16), ("NZ", 16), ("NHEAD", 8)):
+        if not 1 <= getattr(desc, name) <= maximum:
+            raise ValueError(f"{name} must be in 1..{maximum} for this RTL configuration")
     num_gates = desc.num_gates
     vec_len = desc.F + desc.H
 

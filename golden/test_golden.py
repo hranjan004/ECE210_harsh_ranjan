@@ -1,6 +1,7 @@
 """Unit tests for the NILM-TT Python golden model (Layer L1)."""
 
 import math
+import pytest
 import numpy as np
 
 from golden.fixedpoint import sat8, sat16, sat24, rshift_round, requant8, requant16, crc8_maxim
@@ -112,3 +113,20 @@ def test_golden_step_and_debounce():
     ctx2_rt = PanelContext.from_bytes(raw_ctx)
     assert np.array_equal(ctx2_rt.h, ctx2.h)
     assert np.array_equal(ctx2_rt.c, ctx2.c)
+
+
+@pytest.mark.parametrize("field,value", [("F", 0), ("F", 33), ("H", 0), ("H", 17),
+                                        ("NZ", 0), ("NZ", 17), ("NHEAD", 0), ("NHEAD", 9)])
+def test_blob_rejects_unsupported_dimensions(field, value):
+    panel = PanelDescriptor()
+    setattr(panel, field, value)
+    with pytest.raises(ValueError, match=field):
+        pack_model_blob([panel])
+
+
+def test_default_blob_fits_rtl():
+    panel = PanelDescriptor()
+    blob = pack_model_blob([panel])
+    decoded = unpack_panel_descriptor(blob.raw_bytes, blob.desc_offsets[0])
+    assert decoded.H == 16
+    assert decoded.lstm_w.shape == (16, 4, 30)

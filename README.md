@@ -10,6 +10,10 @@ NILM-TT is a descriptor-driven INT8 recurrent neural network (LSTM / GRU) infere
 - **Oversampled Host SPI Slave (`nilm_host_spi`, `nilm_cmd`, `nilm_csr`):** Single-clock-domain Mode-0 SPI slave supporting `LOAD_X`, `RUN`, `RUN_ALL`, `RD_RESULT`, `RD_LOGIT`, `QSPI_INIT`, `STEP_UNIT`, optional CRC-8 frame validation, and full CSR buffer windows (`U_WIN`, `HB_WIN`, `C_WIN`).
 - **Bit-Exact Verification:** Validated against the integer NumPy golden model (`golden/nilm_golden.py`) across unit, protocol, cell, multi-panel LSTM/GRU, debounce, and gate-level smoke cocotb test suites (`test/test.py`).
 
+The current optimized RTL supports F<=32, H<=16, NZ<=16, and eight heads per
+panel. Larger dimensions are rejected with ERR_DESC. See the datasheet for
+PSRAM clock/burst constraints and the fixed 100-byte context format.
+
 ## Repository Structure
 
 - `src/`: Synthesizable Verilog-2005 RTL (`project.v`, `nilm_pkg.vh`, `nilm_host_spi.v`, `nilm_cmd.v`, `nilm_csr.v`, `nilm_qspi.v`, `nilm_seq.v`, `nilm_mac.v`, `nilm_pwl.v`, `nilm_cell.v`, `nilm_head.v`, `nilm_vram.v`)
@@ -24,5 +28,6 @@ NILM-TT is a descriptor-driven INT8 recurrent neural network (LSTM / GRU) infere
 make lint
 make golden
 make test
+make test-datapath
 make synth
 ```

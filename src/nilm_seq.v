@@ -682,7 +682,7 @@ module nilm_seq (
                     desc_f <= qspi_rd_data[5:0];
                   end
                   12'd5: begin
-                    if (qspi_rd_data == 8'd0 || qspi_rd_data > 8'd32) begin
+                    if (qspi_rd_data == 8'd0 || qspi_rd_data > 8'd16) begin
                       qspi_cmd_abort <= 1'b1;
                       seq_err_pulse  <= 1'b1;
                       seq_err_code   <= `ERR_DESC;
@@ -690,8 +690,23 @@ module nilm_seq (
                     end
                     desc_h <= qspi_rd_data[5:0];
                   end
-                  12'd6:  desc_nz        <= qspi_rd_data[4:0];
+                  12'd6: begin
+                    if (qspi_rd_data == 8'd0 || qspi_rd_data > 8'd16) begin
+                      qspi_cmd_abort <= 1'b1;
+                      seq_err_pulse  <= 1'b1;
+                      seq_err_code   <= `ERR_DESC;
+                      state          <= `ST_ERR;
+                    end
+                    desc_nz <= qspi_rd_data[4:0];
+                  end
                   12'd7: begin
+                    // The 100-byte context and RD_LOGIT bank hold eight heads.
+                    if (qspi_rd_data == 8'd0 || qspi_rd_data > 8'd8) begin
+                      qspi_cmd_abort <= 1'b1;
+                      seq_err_pulse  <= 1'b1;
+                      seq_err_code   <= `ERR_DESC;
+                      state          <= `ST_ERR;
+                    end
                     desc_nhead <= qspi_rd_data[4:0];
                     case (cur_panel)
                       2'd0: panel_nhead_0 <= qspi_rd_data[4:0];

@@ -445,3 +445,118 @@ async def test_system_multi_panel_run_pin_and_abort(dut):
     await spi.wait_idle()
     assert await spi.rd_reg(0x0E) == 0x30
     assert len(pmod.protocol_errors) == 0
+
+
+@cocotb.test()
+async def test_descriptor_capacity_rejection(dut):
+    """Reject dimensions that would truncate, alias, or overrun physical storage."""
+    if os.environ.get("GATES") == "yes":
+        return
+    start_chip_clock(dut, period_ns=20)
+    spi = HostSpiDriver(dut)
+    pmod = QspiPmodHarness(dut)
+    pmod.start()
+    panel = _make_random_panel(np.random.default_rng(606))
+    blob = pack_model_blob([panel])
+    for field, offset, values in (("F", 4, (0, 33)), ("H", 5, (0, 17, 32)),
+                                  ("NZ", 6, (0, 17, 32)), ("NHEAD", 7, (0, 9, 16, 32))):
+        for value in values:
+            await spi.reset_chip()
+            raw = bytearray(blob.raw_bytes)
+            raw[blob.desc_offsets[0] + offset] = value
+            pmod.flash.load_image(raw, 0)
+            await spi.qspi_init()
+            await spi.wait_idle()
+            await spi.run_panel(0)
+            await spi.wait_idle()
+            error = await spi.rd_reg(0x0E)
+            assert error == 0x11, f"{field}={value}: expected ERR_DESC, got {error:#x}"
+
+
+@cocotb.test()
+async def test_maximum_dimensions_context_and_last_head(dut):
+    """Full-size LSTM and GRU, signed state, last-head equality and debounce persistence."""
+    if os.environ.get("GATES") == "yes":
+        return
+    start_chip_clock(dut, period_ns=20)
+    spi = HostSpiDriver(dut)
+    pmod = QspiPmodHarness(dut)
+    pmod.start()
+    rng = np.random.default_rng(707)
+    for cell_type in (0, 1):
+        await spi.reset_chip()
+        panel = _make_random_panel(rng, F=32, H=16, NZ=16, NHEAD=8,
+                                   cell_type=cell_type, deb_n=2, deb_m=3)
+        # Exact equality on the final head; history must advance once per run.
+        panel.head_w[-1, :] = 0
+        panel.head_bias[-1] = 0
+        panel.head_theta[-1] = 0
+        pmod.flash.load_image(pack_model_blob([panel]).raw_bytes, 0)
+        pmod.psram.write_bytes(0, bytes(100))
+        await spi.qspi_init()
+        await spi.wait_idle()
+        ctx = PanelContext()
+        for step in range(3):
+            x = rng.integers(-128, 128, size=32, dtype=np.int8)
+            ctx, logits, bits, _ = NilmGolden.step(panel, x, ctx, deb_en=True)
+            await spi.load_x(0, x.tolist())
+            await spi.run_panel(0)
+            await spi.wait_idle()
+            assert await spi.rd_reg(0x0E) == 0
+            assert await spi.rd_result(0) == bits
+            for head in range(8):
+                assert await spi.rd_logit(0, head) == int(logits[head])
+            assert pmod.psram.read_bytes(0, 100) == ctx.to_bytes(), (cell_type, step)
+            assert int(dut.user_project.u_vram.deb_mem[7].value) == (1 << (step + 1)) - 1
+        assert not pmod.protocol_errors, pmod.protocol_errors
+
+
+@cocotb.test()
+async def test_qspi_dividers_and_busy_handover(dut):
+    """Measure safe PSRAM burst settings at 50 MHz and defer handover during inference."""
+    if os.environ.get("GATES") == "yes":
+        return
+    start_chip_clock(dut, period_ns=20)
+    spi = HostSpiDriver(dut)
+    pmod = QspiPmodHarness(dut)
+    pmod.start()
+    await spi.reset_chip()
+    panel = _make_random_panel(np.random.default_rng(909))
+    pmod.flash.load_image(pack_model_blob([panel]).raw_bytes, 0)
+    await spi.qspi_init()
+    await spi.wait_idle()
+    payload = bytes((i * 29 + 3) & 255 for i in range(32))
+    for divider, burst in ((0, 64), (1, 32), (2, 8), (3, 1)):
+        await spi.wr_reg(0x05, 0x20 | (divider << 3))
+        await spi.wr_reg(0x0C, burst)
+        pmod.psram.max_ce_low_clks = 0
+        pmod.psram.read_bursts = pmod.psram.write_bursts = 0
+        await spi.mem_wr(1, 0x200, payload)
+        assert pmod.psram.read_bytes(0x200, 32) == payload
+        assert await spi.mem_rd(1, 0x200, 32) == payload
+        expected_bursts = (32 + burst - 1) // burst
+        assert pmod.psram.read_bursts == expected_bursts
+        assert pmod.psram.write_bursts == expected_bursts
+        measured = pmod.psram.max_ce_low_clks
+        dut._log.info("PSRAM divider=%d burst=%d max_ce_low=%d clks (%d ns)",
+                      divider, burst, measured, measured * 20)
+        assert measured <= 400, (divider, burst, measured)
+    await spi.wr_reg(0x05, 0x20)
+    await spi.wr_reg(0x0C, 64)
+    await spi.load_x(0, [1, -2, 3, -4])
+    await spi.run_panel(0)
+    assert int(dut.uo_out.value) & 4
+    spi.bus_req = 1
+    spi._drive_ui(cs_n=1, sck=0, mosi=0)
+    await ClockCycles(dut.clk, 30)
+    assert not (int(dut.uo_out.value) & 8), "Granted bus while sequencer was busy"
+    await spi.wait_idle()
+    await ClockCycles(dut.clk, 20)
+    assert int(dut.uo_out.value) & 8
+    assert int(dut.uio_oe.value) == 0
+    spi.bus_req = 0
+    spi._drive_ui(cs_n=1, sck=0, mosi=0)
+    await ClockCycles(dut.clk, 20)
+    assert not (int(dut.uo_out.value) & 8)
+    assert await spi.rd_reg(0x0E) == 0
+    assert not pmod.protocol_errors, pmod.protocol_errors
